@@ -2,6 +2,7 @@ package udp
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -110,7 +111,22 @@ func RunClient(args []string) {
 // other than a timeout.
 // Side effects: opens and closes a UDP socket, writes OPEN and RETY datagrams, sets read
 // deadlines on that socket, and logs progress to stderr.
-func Fetch(address string, filename string) ([]byte, error) {
+func Fetch(address string, filename string) (data []byte, fetchErr error) {
+	started := time.Now()
+	openAttempts, retryRounds, retryMessages := 0, 0, 0
+	defer func() {
+		result := map[string]any{
+			"event": "udp_fetch", "filename": filename,
+			"open_attempts": openAttempts, "retry_rounds": retryRounds,
+			"retry_messages": retryMessages, "success": fetchErr == nil,
+			"received_bytes": len(data), "duration_ms": time.Since(started).Milliseconds(),
+		}
+		if fetchErr != nil {
+			result["error"] = fetchErr.Error()
+		}
+		line, _ := json.Marshal(result)
+		fmt.Fprintln(os.Stderr, string(line))
+	}()
 	var conn *net.UDPConn
 	defer func() {
 		if conn != nil {
@@ -121,6 +137,7 @@ func Fetch(address string, filename string) ([]byte, error) {
 	chunks := make(map[int]transferdata.TCP_Pack)
 	num_chunks := 0
 	for attempt := 0; attempt < maxOpenAttempts && num_chunks == 0; attempt++ {
+		openAttempts++
 		var err error
 		conn, err = redial(conn, address)
 		if err != nil {
@@ -153,8 +170,10 @@ func Fetch(address string, filename string) ([]byte, error) {
 				return nil, err
 			}
 		}
-		fmt.Fprintf(os.Stderr, "Missing chunks %v, retrying\n", missing)
+		retryRounds++
+		fmt.Fprintf(os.Stderr, "Missing %d chunks, retrying\n", len(missing))
 		for _, id := range missing {
+			retryMessages++
 			_, err := fmt.Fprintf(conn, "RETY %v %v", filename, id)
 			if err != nil {
 				return nil, fmt.Errorf("sending RETY: %w", err)
